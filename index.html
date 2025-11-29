@@ -4,8 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Route 67 - Restaurant | Bar | Club</title>
+    <!-- Simple favicon link to prevent 404 error -->
+    <link rel="icon" href="https://placehold.co/32x32/f87171/1a1a2e?text=R67" type="image/png">
     <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Note: For production use, install Tailwind as a PostCSS plugin instead of using the CDN. -->
     <style>
         /* Custom styles for the dark, club-like theme */
         body {
@@ -46,27 +49,59 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, addDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Global variables provided by the environment
+        // Global variables provided by the environment (will be undefined when self-hosting)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const firebaseConfigFromEnv = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         let db, auth, userId;
         let isAuthReady = false;
-        let reviewsUnsubscribe = null; // New: Holds the listener unsubscribe function
+        let reviewsUnsubscribe = null;
 
         // Function to initialize Firebase and handle authentication
         async function setupFirebase() {
-            if (!firebaseConfig) {
-                console.error("Firebase config is missing. Review features will not work.");
-                document.getElementById('reviews-error').textContent = "Database connection failed. Reviews cannot be loaded or submitted.";
+            let configToUse = firebaseConfigFromEnv;
+            const reviewsError = document.getElementById('reviews-error');
+
+            if (!configToUse) {
+                console.warn("Canvas environment variables (__firebase_config) are missing. Using a placeholder config.");
+                // --- MANDATORY STEP FOR LOCAL/EXTERNAL HOSTING ---
+                // If you are running this outside of the Canvas environment, you MUST replace the below
+                // placeholder object with your actual Firebase project configuration for the database to work.
+                const firebaseConfig = {
+                  apiKey: "AIzaSyBMJ26zMBNngj097e7CWDbRtLdIsuDfyQE",
+                  authDomain: "route67.firebaseapp.com",
+                  projectId: "route67",
+                  storageBucket: "route67.firebasestorage.app",
+                  messagingSenderId: "597101102578",
+                  appId: "1:597101102578:web:48b0b58c8420c73f36176b",
+                  measurementId: "G-RZS25JWWVV"
+                };
+
+                // Display a clear warning to the user on the UI
+                reviewsError.innerHTML = `
+                    <div class="bg-red-800 text-white p-3 rounded-lg text-center font-semibold mb-4">
+                        ⚠️ Database NOT Connected.
+                        <p class="font-normal text-sm mt-1">If self-hosting, please replace the placeholder Firebase config in the script tag of 'index.html' with your actual credentials.</p>
+                    </div>
+                `;
+            } else {
+                 reviewsError.textContent = "Loading reviews...";
+            }
+
+            // If the placeholder is still used, Firebase init might fail or connect to a non-existent project.
+            // But we must proceed with initialization to prevent the script from halting.
+            try {
+                setLogLevel('Debug');
+                const app = initializeApp(configToUse);
+                db = getFirestore(app);
+                auth = getAuth(app);
+            } catch (e) {
+                console.error("Failed to initialize Firebase app:", e);
+                reviewsError.textContent = "Failed to initialize Firebase App. Check console for config errors.";
                 return;
             }
 
-            setLogLevel('Debug'); // Enabled for better debugging visibility
-            const app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
 
             // Listen for authentication state changes and trigger data loading
             onAuthStateChanged(auth, (user) => {
@@ -76,23 +111,21 @@
                     console.log("Firebase Auth Ready. User ID:", userId);
                     loadReviews(); // Load data once authentication is confirmed
                 } else {
-                    // If no user is found on initial check (and sign-in hasn't been triggered yet)
-                    // We rely on the explicit sign-in below to update the state, which triggers this function again.
-                    // We do NOT set isAuthReady to true here, as we are not ready until a user object exists.
-                    console.log("User not authenticated, waiting for sign-in process.");
+                    // This block ensures we wait for the sign-in attempt to complete
+                    console.log("User not authenticated yet.");
                 }
             });
 
             // Explicitly sign in using custom token or anonymously
-            if (initialAuthToken) {
-                try {
+            try {
+                if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
-                } catch (error) {
-                    console.error("Custom token sign-in failed, trying anonymous sign-in:", error);
+                } else {
                     await signInAnonymously(auth);
                 }
-            } else {
-                await signInAnonymously(auth);
+            } catch (error) {
+                 // Even if sign-in fails (e.g., with mock config), we proceed, but the security rules will prevent data access.
+                 console.error("Firebase sign-in failed (expected if config is mock/invalid):", error.message);
             }
         }
 
@@ -138,23 +171,31 @@
 
             } catch (e) {
                 console.error("Error adding document: ", e);
-                showStatusMessage("Failed to submit review. Check console for details.", 'error');
+                showStatusMessage(`Failed to submit review. Error: ${e.message}`, 'error');
             }
         };
 
         // Function to load reviews in real-time
         function loadReviews() {
+            // Only proceed if auth is ready and db is initialized
             if (!db || !isAuthReady) return;
 
-            // CRITICAL FIX: Ensure onSnapshot listener is only attached once
+            // CRITICAL: Prevent re-attaching the listener
             if (reviewsUnsubscribe) {
-                console.log("Reviews listener already attached. Skipping redundant attachment.");
+                console.log("Reviews listener already attached.");
                 return;
             }
 
             const reviewsList = document.getElementById('reviews-list');
             const reviewsError = document.getElementById('reviews-error');
-            reviewsError.textContent = "Loading reviews...";
+
+            // Clear the placeholder error message if a real connection is being attempted
+            if (reviewsError.innerHTML.indexOf("Database NOT Connected") === -1) {
+                reviewsError.textContent = "Loading reviews...";
+            } else {
+                reviewsList.innerHTML = '<p class="text-gray-400 p-4 text-center">Reviews cannot be loaded without a valid Firebase connection.</p>';
+                return;
+            }
 
             try {
                 const q = query(collection(db, getReviewsCollectionPath()));
@@ -173,7 +214,7 @@
                         reviews.push({ id: doc.id, ...doc.data() });
                     });
 
-                    // Sort by newest first (using client-side sort since timestamp is a server field)
+                    // Sort by newest first (client-side sort)
                     reviews.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
 
                     reviewsList.innerHTML = reviews.map(review => {
@@ -194,8 +235,9 @@
                     }).join('');
 
                 }, (error) => {
+                    // This catches the 'Missing or insufficient permissions' error directly
                     console.error("Error fetching reviews:", error);
-                    reviewsError.textContent = "Error loading reviews. Check connection.";
+                    reviewsError.textContent = `Error fetching reviews: ${error.message}. This usually means your security rules are not set up, or the config is invalid.`;
                 });
 
             } catch (e) {
@@ -323,7 +365,7 @@
 
             <!-- Display Reviews -->
             <h2 class="text-3xl font-bold text-accent-red mb-4">What Our Guests Say</h2>
-            <p id="reviews-error" class="text-yellow-400 text-center mb-4"></p>
+            <div id="reviews-error" class="text-yellow-400 text-center mb-4">Loading reviews...</div>
             <div id="reviews-list" class="space-y-4">
                 <!-- Reviews will be injected here by JavaScript -->
                 <div class="text-center p-8 bg-gray-800 rounded-xl">Loading...</div>
